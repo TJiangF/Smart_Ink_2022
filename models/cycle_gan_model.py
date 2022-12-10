@@ -3,6 +3,12 @@ import itertools
 from util.image_pool import ImagePool
 from .base_model import BaseModel
 from . import networks
+from pytorch_msssim import ssim, ms_ssim, SSIM, MS_SSIM
+import numpy as np
+import scipy.stats as st
+import torch.nn as nn
+import matplotlib.pyplot as plt
+import  torch.nn.functional as F
 
 
 class CycleGANModel(BaseModel):
@@ -80,21 +86,51 @@ class CycleGANModel(BaseModel):
                                             opt.n_layers_D, opt.norm, opt.init_type, opt.init_gain, self.gpu_ids)
             self.netD_B = networks.define_D(opt.input_nc, opt.ndf, opt.netD,
                                             opt.n_layers_D, opt.norm, opt.init_type, opt.init_gain, self.gpu_ids)
+            # The new generator for ink_wash image
+            self.netD_ink = networks.define_D(opt.input_nc, opt.ndf, opt.netD,
+                                            opt.n_layers_D, opt.norm, opt.init_type, opt.init_gain, self.gpu_ids)
 
         if self.isTrain:
             if opt.lambda_identity > 0.0:  # only works when input and output images have the same number of channels
                 assert(opt.input_nc == opt.output_nc)
             self.fake_A_pool = ImagePool(opt.pool_size)  # create image buffer to store previously generated images
             self.fake_B_pool = ImagePool(opt.pool_size)  # create image buffer to store previously generated images
+            self.real_ink_B_pool = ImagePool(opt.pool_size)
+            self.fake_ink_B_pool = ImagePool(opt.pool_size)
             # define loss functions
             self.criterionGAN = networks.GANLoss(opt.gan_mode).to(self.device)  # define GAN loss.
             self.criterionCycle = torch.nn.L1Loss()
+            # apply SSIM loss func for image comparison
+            self.criterionCycleSSIM = MS_SSIM(win_size=11, win_sigma=1.5, data_range=1.0, size_average=True, channel=3)
             self.criterionIdt = torch.nn.L1Loss()
             # initialize optimizers; schedulers will be automatically created by function <BaseModel.setup>.
             self.optimizer_G = torch.optim.Adam(itertools.chain(self.netG_A.parameters(), self.netG_B.parameters()), lr=opt.lr, betas=(opt.beta1, 0.999))
             self.optimizer_D = torch.optim.Adam(itertools.chain(self.netD_A.parameters(), self.netD_B.parameters()), lr=opt.lr, betas=(opt.beta1, 0.999))
             self.optimizers.append(self.optimizer_G)
             self.optimizers.append(self.optimizer_D)
+
+        if self.isTrain: #define gaussian blur
+            g_kernel = self.gauss_kernel(21, 3, 1).transpose((3, 2, 1, 0))
+            self.gauss_conv = nn.Conv2d(1, 1, kernel_size=21, stride=1, padding='same', padding_mode='replicate', bias=False)
+            # use Gaussian kernel for blurring. The weight does not need to be updated.
+            self.gauss_conv.weight.data.copy_(torch.from_numpy(g_kernel))
+            self.gauss_conv.weight.requires_grad = False
+            if torch.cuda.is_available():
+                self.gauss_conv.cuda()
+
+    """
+    generate a gauss kernel for ink wash blurring.
+    """
+    def gauss_kernel(self, kernel_size = 21, nsig=3, channels=1):
+        interval = (2 * nsig + 1.) / (kernel_size)
+        x = np.linspace(-nsig - interval / 2., nsig + interval / 2., kernel_size + 1)
+        kern1d = np.diff(st.norm.cdf(x))
+        kernel_raw = np.sqrt(np.outer(kern1d, kern1d))
+        kernel = kernel_raw / kernel_raw.sum()
+        out_filter = np.array(kernel, dtype=np.float32)
+        out_filter = out_filter.reshape((kernel_size, kernel_size, 1, 1))
+        out_filter = np.repeat(out_filter, channels, axis=2)
+        return out_filter
 
     def set_input(self, input):
         """Unpack input data from the dataloader and perform necessary pre-processing steps.
@@ -109,12 +145,25 @@ class CycleGANModel(BaseModel):
         self.real_B = input['B' if AtoB else 'A'].to(self.device)
         self.image_paths = input['A_paths' if AtoB else 'B_paths']
 
+    def get_ink_wash(self, img):
+        p1d = (3, 3, 3, 3)
+        padding_img = F.pad(img, p1d, "constant", 1)
+        # pooling size (7,7), with padding(3,3) to get the same size as input
+        erode_img = -1 * (F.max_pool2d(-1 * padding_img, 7, 1))
+        channel1 = self.gauss_conv(erode_img[:, 0, :, :].unsqueeze(1))
+        channel2 = self.gauss_conv(erode_img[:, 1, :, :].unsqueeze(1))
+        channel3 = self.gauss_conv(erode_img[:, 2, :, :].unsqueeze(1))
+        return torch.cat((channel1, channel2, channel3), dim = 1)
+
+
     def forward(self):
         """Run forward pass; called by both functions <optimize_parameters> and <test>."""
         self.fake_B = self.netG_A(self.real_A)  # G_A(A)
         self.rec_A = self.netG_B(self.fake_B)   # G_B(G_A(A))
         self.fake_A = self.netG_B(self.real_B)  # G_B(B)
         self.rec_B = self.netG_A(self.fake_A)   # G_A(G_B(B))
+        self.ink_real_B = self.get_ink_wash(self.real_B)
+        self.ink_fake_B = self.get_ink_wash(self.fake_B)
 
     def backward_D_basic(self, netD, real, fake):
         """Calculate GAN loss for the discriminator
@@ -148,11 +197,16 @@ class CycleGANModel(BaseModel):
         fake_A = self.fake_A_pool.query(self.fake_A)
         self.loss_D_B = self.backward_D_basic(self.netD_B, self.real_A, fake_A)
 
+    def backward_D_ink(self):
+        ink_fake_B = self.fake_ink_B_pool.query(self.ink_fake_B)
+        self.loss_D_ink = self.backward_D_basic(self.netD_ink, self.ink_real_B, self.ink_fake_B)
+
     def backward_G(self):
         """Calculate the loss for generators G_A and G_B"""
         lambda_idt = self.opt.lambda_identity
         lambda_A = self.opt.lambda_A
         lambda_B = self.opt.lambda_B
+        lambda_ink = 0.05
         # Identity loss
         if lambda_idt > 0:
             # G_A should be identity if real_B is fed: ||G_A(B) - B||
@@ -169,12 +223,16 @@ class CycleGANModel(BaseModel):
         self.loss_G_A = self.criterionGAN(self.netD_A(self.fake_B), True)
         # GAN loss D_B(G_B(B))
         self.loss_G_B = self.criterionGAN(self.netD_B(self.fake_A), True)
+        # ink wash loss
+        self.loss_G_ink = self.criterionGAN(self.netD_ink(self.ink_fake_B), True) * lambda_ink
         # Forward cycle loss || G_B(G_A(A)) - A||
         self.loss_cycle_A = self.criterionCycle(self.rec_A, self.real_A) * lambda_A
+        # self.loss_cycle_A = (1 - self.criterionCycleSSIM(self.rec_A, self.real_A)) * lambda_A
         # Backward cycle loss || G_A(G_B(B)) - B||
         self.loss_cycle_B = self.criterionCycle(self.rec_B, self.real_B) * lambda_B
+        self.loss_cycle_B = (1 - self.criterionCycleSSIM(self.rec_B, self.real_B)) * lambda_B
         # combined loss and calculate gradients
-        self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B
+        self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B + self.loss_G_ink
         self.loss_G.backward()
 
     def optimize_parameters(self):
@@ -187,8 +245,23 @@ class CycleGANModel(BaseModel):
         self.backward_G()             # calculate gradients for G_A and G_B
         self.optimizer_G.step()       # update G_A and G_B's weights
         # D_A and D_B
-        self.set_requires_grad([self.netD_A, self.netD_B], True)
+        self.set_requires_grad([self.netD_A, self.netD_B, self.netD_ink], True)
         self.optimizer_D.zero_grad()   # set D_A and D_B's gradients to zero
         self.backward_D_A()      # calculate gradients for D_A
         self.backward_D_B()      # calculate graidents for D_B
+        self.backward_D_ink()    # calculate gradients for D_ink
         self.optimizer_D.step()  # update D_A and D_B's weights
+
+    """
+    display an img.
+    Matplotlib will automatically turn a normalized image [0,1] to a regular image [0,255] 
+    """
+    def check_img(self, img):
+        img = np.array(img)
+        print('current shape', img.shape)
+        img = img.squeeze()
+        img = img.transpose((1, 2, 0))
+        plt.figure("Test Image Sample")  # 图像窗口名称
+        plt.imshow(img)
+        plt.show()
+
