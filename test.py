@@ -33,12 +33,6 @@ from models import create_model
 from util.visualizer import save_images
 from util import html
 
-try:
-    import wandb
-except ImportError:
-    print('Warning: wandb package cannot be found. The option "--use_wandb" will result in error.')
-
-
 if __name__ == '__main__':
     opt = TestOptions().parse()  # get test options
     # hard-code some parameters for test
