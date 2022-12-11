@@ -9,7 +9,7 @@ import scipy.stats as st
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import  torch.nn.functional as F
-from models import Hed
+from models.Hed import Hed
 
 
 class CycleGANModel(BaseModel):
@@ -92,15 +92,14 @@ class CycleGANModel(BaseModel):
             if torch.cuda.is_available():
                 self.gauss_conv.cuda()
 
-        if self.opt.use_HED:
             # ~~~~~~
-            self.hed_model = Hed()
-            if torch.cuda.is_available():
-                self.hed_model.cuda()
-            save_path = './hed_pre_trained_model.pth'
-            self.hed_model.load_state_dict(torch.load(save_path))
-            for param in self.hed_model.parameters():
-                param.requires_grad = False
+        self.hed_model = Hed()
+        if torch.cuda.is_available():
+            self.hed_model.cuda()
+        save_path = './hed_pre_trained_model.pth'
+        self.hed_model.load_state_dict(torch.load(save_path))
+        for param in self.hed_model.parameters():
+            param.requires_grad = False
             # ~~~~~~
 
 
@@ -141,6 +140,19 @@ class CycleGANModel(BaseModel):
         channel3 = self.gauss_conv(erode_img[:, 2, :, :].unsqueeze(1))
         return torch.cat((channel1, channel2, channel3), dim = 1)
 
+    @staticmethod
+    def cross_entropy(sig_logits, label):
+        # print(sig_logits)
+        count_neg = torch.sum(1. - label)
+        count_pos = torch.sum(label)
+
+        beta = count_neg / (count_pos + count_neg)
+        pos_weight = beta / (1 - beta)
+
+        cost = pos_weight * label * (-1) * torch.log(sig_logits) + (1 - label) * (-1) * torch.log(1 - sig_logits)
+        cost = torch.mean(cost * (1 - beta))
+
+        return cost
 
     def forward(self):
         """Run forward pass; called by both functions <optimize_parameters> and <test>."""
@@ -150,6 +162,10 @@ class CycleGANModel(BaseModel):
         self.rec_B = self.netG_A(self.fake_A)   # G_A(G_B(B))
         self.ink_real_B = self.get_ink_wash(self.real_B)
         self.ink_fake_B = self.get_ink_wash(self.fake_B)
+        self.edge_real_A = torch.sigmoid(self.hed_model(self.real_A.detach()))
+        self.edge_fake_B = torch.sigmoid(self.hed_model(self.fake_B))
+
+
 
     def backward_D_basic(self, netD, real, fake):
         """Calculate GAN loss for the discriminator
@@ -192,7 +208,8 @@ class CycleGANModel(BaseModel):
         lambda_idt = self.opt.lambda_identity
         lambda_A = self.opt.lambda_A
         lambda_B = self.opt.lambda_B
-        lambda_ink = 0.05
+        lambda_ink = self.opt.lambda_ink_wash
+        lambda_edge = self.opt.lambda_edge
         # Identity loss
         if lambda_idt > 0:
             # G_A should be identity if real_B is fed: ||G_A(B) - B||
@@ -217,11 +234,14 @@ class CycleGANModel(BaseModel):
         # Backward cycle loss || G_A(G_B(B)) - B||
         self.loss_cycle_B = self.criterionCycle(self.rec_B, self.real_B) * lambda_B
         self.loss_cycle_B_SSIM = (1 - self.criterionCycleSSIM(self.rec_B, self.real_B)) * lambda_B
+        # calculate edge loss
+        self.loss_G_edge = self.cross_entropy(self.edge_fake_B, self.edge_real_A) * lambda_A
         # combined loss and calculate gradients
         if self.opt.use_SSIM:
-            self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A_SSIM + self.loss_cycle_B_SSIM + self.loss_idt_A + self.loss_idt_B + self.loss_G_ink
+            self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A_SSIM + self.loss_cycle_B_SSIM + self.loss_idt_A + self.loss_idt_B + self.loss_G_ink + self.loss_G_edge
         else:
-            self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B + self.loss_G_ink
+            self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B + self.loss_G_ink + self.loss_G_edge
+
         self.loss_G.backward()
 
     def optimize_parameters(self):
@@ -249,7 +269,8 @@ class CycleGANModel(BaseModel):
         img = np.array(img)
         print('current shape', img.shape)
         img = img.squeeze()
-        img = img.transpose((1, 2, 0))
+        if len(img.shape) == 3:
+            img = img.transpose((1, 2, 0))
         plt.figure("Test Image Sample")
         plt.imshow(img)
         plt.show()

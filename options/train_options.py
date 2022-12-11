@@ -40,9 +40,8 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--lambda_identity', type=float, default=0.5, help='use identity mapping.')
         parser.add_argument('--lambda_ink_wash', type=float, default=0.05, help = 'weight for ink_wash loss')
         parser.add_argument('--use_SSIM', type=bool, default=False, help='use SSIM loss to measure real and rec')
-        parser.add_argument('--use_TVL ', type=bool, default=True, help='use TVL to denoise')
-        parser.add_argument('--lambda_ink_wash', type=float, default=0.05, help='weight for ink_wash loss')
-        parser.add_argument('--use_HED', type=bool, default=True, help='use HED to detect the edge between fake_B and real_A')
+        parser.add_argument('--use_TVL', type=bool, default=True, help='use TVL to denoise')
+        parser.add_argument('--lambda_edge', type=float, default=0.5, help='the weight for brush stroke')
 
         self.isTrain = True
         return parser
