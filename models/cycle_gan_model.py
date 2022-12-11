@@ -10,6 +10,8 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 import  torch.nn.functional as F
 from models.Hed import Hed
+from models.RCF import RCF
+import scipy.io as sio
 
 
 class CycleGANModel(BaseModel):
@@ -32,10 +34,10 @@ class CycleGANModel(BaseModel):
         """
         BaseModel.__init__(self, opt)
         # specify the training losses you want to print out. The training/test scripts will call <BaseModel.get_current_losses>
-        self.loss_names = ['D_A', 'G_A', 'cycle_A', 'idt_A', 'D_B', 'G_B', 'cycle_B', 'idt_B', 'G_ink', 'cycle_A_SSIM', 'cycle_B_SSIM']
+        self.loss_names = ['D_A', 'G_A', 'cycle_A', 'idt_A', 'D_B', 'G_B', 'cycle_B', 'idt_B', 'G_ink', 'cycle_A_SSIM', 'cycle_B_SSIM', 'G_edge']
         # specify the images you want to save/display. The training/test scripts will call <BaseModel.get_current_visuals>
         visual_names_A = ['real_A', 'fake_B', 'rec_A', ]
-        visual_names_B = ['real_B', 'fake_A', 'rec_B', 'ink_real_B', 'ink_fake_B']
+        visual_names_B = ['real_B', 'fake_A', 'rec_B', 'ink_real_B', 'ink_fake_B', 'edge_real_A', 'edge_fake_B']
         if self.isTrain and self.opt.lambda_identity > 0.0:  # if identity loss is used, we also visualize idt_B=G_A(B) ad idt_A=G_A(B)
             visual_names_A.append('idt_B')
             visual_names_B.append('idt_A')
@@ -93,14 +95,35 @@ class CycleGANModel(BaseModel):
                 self.gauss_conv.cuda()
 
             # ~~~~~~
-        self.hed_model = Hed()
-        if torch.cuda.is_available():
-            self.hed_model.cuda()
-        save_path = './hed_pre_trained_model.pth'
-        self.hed_model.load_state_dict(torch.load(save_path))
-        for param in self.hed_model.parameters():
-            param.requires_grad = False
-            # ~~~~~~
+        if self.opt.edge_detector == 'HED':
+            self.hed_model = Hed()
+            if torch.cuda.is_available():
+                self.hed_model.cuda()
+            save_path = './hed_pre_trained_model.pth'
+            self.hed_model.load_state_dict(torch.load(save_path))
+            for param in self.hed_model.parameters():
+                param.requires_grad = False
+                # ~~~~~~
+        elif self.opt.edge_detector == 'RCF':
+            self.hed_model = RCF()
+            if torch.cuda.is_available():
+                self.hed_model.cuda()
+            mat_path = './vgg16convs.mat'
+            vgg16 = sio.loadmat(mat_path)
+            torch_params = self.hed_model.state_dict()
+            for k in vgg16.keys():
+                name_par = k.split('-')
+                size = len(name_par)
+                if size == 2:
+                    name_space = name_par[0] + '.' + name_par[1]
+                    data = np.squeeze(vgg16[k])
+                    torch_params[name_space] = torch.from_numpy(data)
+            self.hed_model.load_state_dict(torch_params)
+            for param in self.hed_model.parameters():
+                param.requires_grad = False
+
+
+
 
 
     """
@@ -162,8 +185,8 @@ class CycleGANModel(BaseModel):
         self.rec_B = self.netG_A(self.fake_A)   # G_A(G_B(B))
         self.ink_real_B = self.get_ink_wash(self.real_B)
         self.ink_fake_B = self.get_ink_wash(self.fake_B)
-        self.edge_real_A = torch.sigmoid(self.hed_model(self.real_A.detach()))
-        self.edge_fake_B = torch.sigmoid(self.hed_model(self.fake_B))
+        self.edge_real_A = torch.sigmoid(self.hed_model(self.real_A.detach())[1])
+        self.edge_fake_B = torch.sigmoid(self.hed_model(self.fake_B)[1])
 
 
 
