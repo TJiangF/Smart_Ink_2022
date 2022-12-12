@@ -42,7 +42,7 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--use_SSIM', type=bool, default=False, help='use SSIM loss to measure real and rec')
         parser.add_argument('--use_TVL', type=bool, default=True, help='use TVL to denoise')
         parser.add_argument('--lambda_edge', type=float, default=0.5, help='the weight for brush stroke')
-        parser.add_argument('--edge_detector', type=str, default='HED', help='use HED or RCF as edge detector')
+        parser.add_argument('--edge_detector', type=str, default='RCF', help='use HED or RCF as edge detector')
 
         self.isTrain = True
         return parser

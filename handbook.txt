@@ -1,10 +1,7 @@
 conda activate CycleGan
 
 train:
-python train.py --dataroot ./datasets/maps --name maps_cyclegan --model cycle_gan
-
-python train.py --dataroot ./datasets/ink/horse --name ink_horse_cyclegan --model cycle_gan
+python train.py --dataroot ./datasets/ink/horse --name ink_horse_cyclegan
 
 test:
-python test.py --dataroot ./datasets/ink/horse --name ink_horse_cyclegan --model cycle_gan
-python test.py --dataroot ./datasets/horse1 --name ink_horse_cyclegan --model cycle_gan
+python test.py --dataroot ./datasets/ink/horse --name ink_horse_cyclegan

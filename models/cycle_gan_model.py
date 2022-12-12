@@ -12,6 +12,7 @@ import  torch.nn.functional as F
 from models.Hed import Hed
 from models.RCF import RCF
 import scipy.io as sio
+from models.TVL import TVLoss
 
 
 class CycleGANModel(BaseModel):
@@ -36,8 +37,8 @@ class CycleGANModel(BaseModel):
         # specify the training losses you want to print out. The training/test scripts will call <BaseModel.get_current_losses>
         self.loss_names = ['D_A', 'G_A', 'cycle_A', 'idt_A', 'D_B', 'G_B', 'cycle_B', 'idt_B', 'G_ink', 'cycle_A_SSIM', 'cycle_B_SSIM', 'G_edge']
         # specify the images you want to save/display. The training/test scripts will call <BaseModel.get_current_visuals>
-        visual_names_A = ['real_A', 'fake_B', 'rec_A', ]
-        visual_names_B = ['real_B', 'fake_A', 'rec_B', 'ink_real_B', 'ink_fake_B', 'edge_real_A', 'edge_fake_B']
+        visual_names_A = ['real_A', 'fake_B', 'rec_A', 'edge_real_A']
+        visual_names_B = ['real_B', 'fake_A', 'rec_B', 'ink_real_B', 'ink_fake_B', 'edge_fake_B']
         if self.isTrain and self.opt.lambda_identity > 0.0:  # if identity loss is used, we also visualize idt_B=G_A(B) ad idt_A=G_A(B)
             visual_names_A.append('idt_B')
             visual_names_B.append('idt_A')
@@ -78,6 +79,8 @@ class CycleGANModel(BaseModel):
             self.criterionCycle = torch.nn.L1Loss()
             # apply SSIM loss func for image comparison
             self.criterionCycleSSIM = SSIM(win_size=11, win_sigma=1.5, data_range=1.0, size_average=True, channel=3, nonnegative_ssim=True)
+            # apply TVL loss to denoise
+            self.criterionTVL = TVLoss()
             self.criterionIdt = torch.nn.L1Loss()
             # initialize optimizers; schedulers will be automatically created by function <BaseModel.setup>.
             self.optimizer_G = torch.optim.Adam(itertools.chain(self.netG_A.parameters(), self.netG_B.parameters()), lr=opt.lr, betas=(opt.beta1, 0.999))
@@ -108,7 +111,7 @@ class CycleGANModel(BaseModel):
             self.hed_model = RCF()
             if torch.cuda.is_available():
                 self.hed_model.cuda()
-            mat_path = './vgg16convs.mat'
+            mat_path = './rcf_pre_trained_model.mat'
             vgg16 = sio.loadmat(mat_path)
             torch_params = self.hed_model.state_dict()
             for k in vgg16.keys():
@@ -185,9 +188,13 @@ class CycleGANModel(BaseModel):
         self.rec_B = self.netG_A(self.fake_A)   # G_A(G_B(B))
         self.ink_real_B = self.get_ink_wash(self.real_B)
         self.ink_fake_B = self.get_ink_wash(self.fake_B)
-        self.edge_real_A = torch.sigmoid(self.hed_model(self.real_A.detach())[1])
-        self.edge_fake_B = torch.sigmoid(self.hed_model(self.fake_B)[1])
-
+        if self.opt.edge_detector == 'HED':
+            self.edge_real_A = torch.sigmoid(self.hed_model(self.real_A.detach()))
+            self.edge_fake_B = torch.sigmoid(self.hed_model(self.fake_B))
+        elif self.opt.edge_detector == 'RCF':
+            # the output of RCF 'fuse' res. No need for sigmoid
+            self.edge_real_A = self.hed_model(self.real_A.detach())[4]
+            self.edge_fake_B = self.hed_model(self.fake_B)[4]
 
 
     def backward_D_basic(self, netD, real, fake):
@@ -264,7 +271,9 @@ class CycleGANModel(BaseModel):
             self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A_SSIM + self.loss_cycle_B_SSIM + self.loss_idt_A + self.loss_idt_B + self.loss_G_ink + self.loss_G_edge
         else:
             self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B + self.loss_G_ink + self.loss_G_edge
-
+        if self.opt.use_TVL:
+            self.loss_G_TVL = self.criterionTVL(self.fake_B)
+            self.loss_G += self.loss_G_TVL
         self.loss_G.backward()
 
     def optimize_parameters(self):
